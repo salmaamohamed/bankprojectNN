@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import joblib
 import warnings
+from math import log
 warnings.filterwarnings('ignore')
 
 # Page configuration
@@ -48,7 +49,9 @@ def load_model(filename):
 # Load the correct model based on selection
 model = None
 model_name = ""
+preprocessor = None
 
+# Load models
 if model_choice == "Logistic Regression":
     model = load_model("bank_marketing_model_lr.joblib")
     model_name = "Logistic Regression"
@@ -61,6 +64,12 @@ elif model_choice == "Logistic Regression (GridSearch)":
 elif model_choice == "Random Forest (GridSearch)":
     model = load_model("random_forest_model_withGridSearch.joblib")
     model_name = "Random Forest (GridSearch Optimized)"
+
+# Try to load preprocessor if exists
+try:
+    preprocessor = joblib.load("preprocessor.joblib")
+except:
+    preprocessor = None
 
 # Display model info
 if model:
@@ -212,26 +221,36 @@ with st.sidebar.expander("📊 Campaign Details"):
     )
 
 # ----------------------
-# CREATE INPUT DATAFRAME
+# FEATURE TRANSFORMATION FUNCTIONS
 # ----------------------
-input_data = pd.DataFrame({
-    "age": [age],
-    "job": [job],
-    "marital": [marital],
-    "education": [education],
-    "default": [default],
-    "balance": [balance],
-    "housing": [housing],
-    "loan": [loan],
-    "contact": [contact],
-    "day": [day],
-    "month": [month],
-    "duration": [duration],
-    "campaign": [campaign],
-    "pdays": [pdays],
-    "previous": [previous],
-    "poutcome": [poutcome]
-})
+def transform_features(input_df):
+    """Apply the same transformations used during training"""
+    df = input_df.copy()
+    
+    # Create log transformations
+    df['LogBalance'] = np.log1p(df['balance'] - df['balance'].min() + 1)
+    df['LogDuration'] = np.log1p(df['duration'])
+    
+    # Process pdays_clean (as in the notebook)
+    df['pdays_clean'] = df['pdays'].apply(lambda x: 0 if x == -1 else 1)
+    
+    # Drop original columns if they're not needed
+    columns_to_drop = ['balance', 'duration', 'pdays']
+    for col in columns_to_drop:
+        if col in df.columns:
+            df = df.drop(col, axis=1)
+    
+    return df
+
+def get_expected_columns(model, preprocessor=None):
+    """Get the expected columns from the model"""
+    if hasattr(model, 'feature_names_in_'):
+        return list(model.feature_names_in_)
+    elif preprocessor is not None:
+        # Try to get columns from preprocessor
+        if hasattr(preprocessor, 'get_feature_names_out'):
+            return list(preprocessor.get_feature_names_out())
+    return None
 
 # ----------------------
 # MAIN CONTENT AREA
@@ -244,6 +263,14 @@ with tab1:
     st.header("Prediction Results")
     
     if model:
+        # Get expected columns
+        expected_columns = get_expected_columns(model, preprocessor)
+        
+        if expected_columns:
+            st.info(f"📋 Model expects {len(expected_columns)} features")
+            with st.expander("View expected features"):
+                st.write(expected_columns)
+        
         # Create prediction button with styling
         predict_col1, predict_col2, predict_col3 = st.columns([1, 2, 1])
         
@@ -257,9 +284,51 @@ with tab1:
         if predict_button:
             with st.spinner("Processing prediction..."):
                 try:
+                    # Create initial input dataframe
+                    input_data = pd.DataFrame({
+                        "age": [age],
+                        "job": [job],
+                        "marital": [marital],
+                        "education": [education],
+                        "default": [default],
+                        "balance": [balance],
+                        "housing": [housing],
+                        "loan": [loan],
+                        "contact": [contact],
+                        "day": [day],
+                        "month": [month],
+                        "duration": [duration],
+                        "campaign": [campaign],
+                        "pdays": [pdays],
+                        "previous": [previous],
+                        "poutcome": [poutcome]
+                    })
+                    
+                    # Apply transformations
+                    transformed_data = transform_features(input_data)
+                    
+                    st.subheader("Transformed Features")
+                    st.dataframe(transformed_data, use_container_width=True)
+                    
+                    # Check if we have all expected columns
+                    if expected_columns:
+                        missing_cols = set(expected_columns) - set(transformed_data.columns)
+                        extra_cols = set(transformed_data.columns) - set(expected_columns)
+                        
+                        if missing_cols:
+                            st.warning(f"Missing columns: {missing_cols}")
+                            # Add missing columns with default values
+                            for col in missing_cols:
+                                transformed_data[col] = 0
+                        
+                        if extra_cols:
+                            st.info(f"Extra columns will be removed: {extra_cols}")
+                            # Keep only expected columns
+                            transformed_data = transformed_data[expected_columns]
+                    
                     # Make prediction
-                    prediction = model.predict(input_data)[0]
-                    proba = model.predict_proba(input_data)[0]
+                    prediction = model.predict(transformed_data)[0]
+                    proba = model.predict_proba(transformed_data)[0]
                     
                     # Display results with better visualizations
                     result_col1, result_col2 = st.columns(2)
@@ -300,7 +369,7 @@ with tab1:
                         
                 except Exception as e:
                     st.error(f"❌ Prediction error: {str(e)}")
-                    st.info("Make sure all required features are present in the input data.")
+                    st.info("Try using a different model or check the feature transformations.")
     else:
         st.warning("Please select and load a model first.")
 
@@ -308,8 +377,51 @@ with tab2:
     st.header("Input Data Overview")
     
     # Display the input data
-    st.subheader("Current Customer Profile")
+    st.subheader("Raw Input Features")
+    input_data = pd.DataFrame({
+        "age": [age],
+        "job": [job],
+        "marital": [marital],
+        "education": [education],
+        "default": [default],
+        "balance": [balance],
+        "housing": [housing],
+        "loan": [loan],
+        "contact": [contact],
+        "day": [day],
+        "month": [month],
+        "duration": [duration],
+        "campaign": [campaign],
+        "pdays": [pdays],
+        "previous": [previous],
+        "poutcome": [poutcome]
+    })
+    
     st.dataframe(input_data, use_container_width=True)
+    
+    # Show transformed features
+    st.subheader("Transformed Features (for model)")
+    try:
+        transformed_data = transform_features(input_data)
+        st.dataframe(transformed_data, use_container_width=True)
+        
+        # Show transformations
+        with st.expander("Transformations Applied"):
+            st.markdown("""
+            **Applied Feature Engineering:**
+            1. **LogBalance** = log(1 + balance - min(balance) + 1)
+            2. **LogDuration** = log(1 + duration)
+            3. **pdays_clean** = 1 if pdays > -1 else 0
+            """)
+            
+            st.metric("Original Balance", f"€{balance:,}")
+            st.metric("LogBalance", f"{transformed_data['LogBalance'].iloc[0]:.2f}")
+            st.metric("Original Duration", f"{duration}s")
+            st.metric("LogDuration", f"{transformed_data['LogDuration'].iloc[0]:.2f}")
+            st.metric("pdays_clean", "Previously Contacted" if pdays != -1 else "Not Previously Contacted")
+            
+    except Exception as e:
+        st.error(f"Could not transform features: {e}")
     
     # Statistics
     st.subheader("Quick Statistics")
@@ -323,15 +435,6 @@ with tab2:
     
     with stats_col3:
         st.metric("Call Duration", f"{duration}s")
-    
-    # Data type information
-    with st.expander("Data Types"):
-        dtype_info = pd.DataFrame({
-            "Feature": input_data.columns,
-            "Type": input_data.dtypes.astype(str).values,
-            "Sample Value": input_data.iloc[0].values
-        })
-        st.dataframe(dtype_info, use_container_width=True)
 
 with tab3:
     st.header("Feature Importance Analysis")
@@ -341,7 +444,12 @@ with tab3:
         try:
             # Get feature importances
             importances = model.feature_importances_
-            feature_names = input_data.columns
+            
+            # Get feature names
+            if expected_columns:
+                feature_names = expected_columns
+            else:
+                feature_names = [f"Feature_{i}" for i in range(len(importances))]
             
             # Create importance dataframe
             importance_df = pd.DataFrame({
@@ -356,8 +464,8 @@ with tab3:
             # Display table
             st.dataframe(importance_df, use_container_width=True)
             
-        except:
-            st.info("Feature importance not available for this model type.")
+        except Exception as e:
+            st.info(f"Feature importance not available: {e}")
     else:
         st.info("""
         **Feature Importance Information**
@@ -383,6 +491,12 @@ with tab4:
     - 17 features including age, job, balance, loan status, and campaign details
     - Target variable: Subscription to term deposit (yes/no)
     
+    ### 🔧 Feature Engineering
+    Models use transformed features:
+    - **LogBalance**: Log-transformed balance (handles skewness)
+    - **LogDuration**: Log-transformed call duration
+    - **pdays_clean**: Binary indicator for previous contact
+    
     ### 🤖 Available Models
     1. **Logistic Regression** - Baseline linear model
     2. **Random Forest** - Ensemble tree-based model
@@ -393,11 +507,6 @@ with tab4:
     - Uses **scikit-learn** machine learning models
     - Implements **SMOTE** for handling class imbalance
     - Includes **GridSearchCV** for hyperparameter optimization
-    
-    ### 📈 Business Impact
-    - **Reduce marketing costs** by targeting high-potential customers
-    - **Increase conversion rates** with data-driven insights
-    - **Optimize campaign ROI** through predictive targeting
     """)
     
     # Add model performance metrics if available
@@ -420,10 +529,31 @@ with tab4:
     st.caption("*Note: Sample metrics. Actual performance may vary based on test data.*")
 
 # ----------------------
+# DEBUGGING SECTION (Hidden by default)
+# ----------------------
+with st.sidebar.expander("🛠️ Debug Info"):
+    st.write("**Current Model:**", model_name)
+    if model:
+        st.write("**Model Type:**", type(model).__name__)
+        if hasattr(model, 'n_features_in_'):
+            st.write("**Expected Features:**", model.n_features_in_)
+    
+    # Test transformation
+    if st.button("Test Transformation"):
+        test_df = pd.DataFrame({
+            "balance": [balance],
+            "duration": [duration],
+            "pdays": [pdays]
+        })
+        transformed = transform_features(test_df)
+        st.write("Transformed:", transformed.columns.tolist())
+        st.write("Values:", transformed.values.tolist())
+
+# ----------------------
 # FOOTER
 # ----------------------
 st.markdown("---")
-footer_col1, footer_col2, footer_col3 = st.columns(3)
+footer_col1, footer_col2, footer_col_col3 = st.columns(3)
 
 with footer_col1:
     st.caption("🏦 Bank Marketing Predictor v1.0")
@@ -431,7 +561,7 @@ with footer_col1:
 with footer_col2:
     st.caption("📊 Powered by scikit-learn & Streamlit")
 
-with footer_col3:
+with footer_col_col3:
     st.caption("🔒 For demonstration purposes only")
 
 # ----------------------
@@ -469,6 +599,10 @@ st.markdown("""
         gap: 1px;
         padding-top: 10px;
         padding-bottom: 10px;
+    }
+    
+    .stAlert {
+        border-radius: 10px;
     }
 </style>
 """, unsafe_allow_html=True)
